@@ -1411,6 +1411,24 @@ namespace UAssetAPI
         /// </remarks>
         public int LegacyFileVersion;
 
+        /// <summary>
+        /// Whether this asset's header carries a UE5 object version field directly after the UE4 one.
+        /// Determined at read time from the value actually present there, and written back exactly as read.
+        /// </summary>
+        [JsonIgnore]
+        public bool HasUE5VersionField = true;
+
+        /// <summary>
+        /// Returns true if the given value is a plausible UE5 object version. Some games (e.g. Delta Force Mobile)
+        /// set <see cref="LegacyFileVersion"/> to -4613 while still serializing a stock UE4 summary, so the bytes
+        /// after the UE4 version are not a UE5 version at all and must not be consumed.
+        /// </summary>
+        private static bool IsPlausibleUE5FileVersion(ObjectVersionUE5 fileVersionUE5)
+        {
+            if (fileVersionUE5 == ObjectVersionUE5.UNKNOWN) return true; // an explicit zero is how an unversioned UE5 asset states it
+            return fileVersionUE5 >= ObjectVersionUE5.INITIAL_VERSION && fileVersionUE5 <= ObjectVersionUE5.AUTOMATIC_VERSION;
+        }
+
         internal ECustomVersionSerializationFormat CustomVersionSerializationFormat
         {
             get
@@ -1773,8 +1791,20 @@ namespace UAssetAPI
 
             if (LegacyFileVersion <= -8)
             {
+                long versionFieldStart = reader.BaseStream.Position;
                 ObjectVersionUE5 fileVersionUE5 = (ObjectVersionUE5)reader.ReadInt32();
-                if (fileVersionUE5 > ObjectVersionUE5.UNKNOWN) ObjectVersionUE5 = fileVersionUE5;
+                HasUE5VersionField = IsPlausibleUE5FileVersion(fileVersionUE5);
+                if (!HasUE5VersionField)
+                {
+                    // this asset claims a serialization format new enough to carry a UE5 version, but the value
+                    // there is not one; some games (e.g. Delta Force Mobile) reuse the field directly before the
+                    // custom version count for something else, so rewind and parse the file as UE4-only
+                    reader.BaseStream.Position = versionFieldStart;
+                }
+                else
+                {
+                    if (fileVersionUE5 > ObjectVersionUE5.UNKNOWN) ObjectVersionUE5 = fileVersionUE5;
+                }
             }
             if (ObjectVersionUE5 == ObjectVersionUE5.UNKNOWN && Mappings != null && Mappings.FileVersionUE5 > 0) ObjectVersionUE5 = Mappings.FileVersionUE5;
 
@@ -1855,7 +1885,9 @@ namespace UAssetAPI
             }
             ThumbnailTableOffset = reader.ReadInt32();
 
-            if (ObjectVersionUE5 >= ObjectVersionUE5.IMPORT_TYPE_HIERARCHIES)
+            // UE5 stores the import type hierarchy map pointer here. Summaries that claim a UE5-era
+            // format without carrying a UE5 object version (e.g. Delta Force Mobile) write it as well.
+            if (ObjectVersionUE5 >= ObjectVersionUE5.IMPORT_TYPE_HIERARCHIES || !HasUE5VersionField)
             {
                 ImportTypeHierarchiesCount = reader.ReadInt32();
                 ImportTypeHierarchiesOffset = reader.ReadInt32();
@@ -2413,7 +2445,7 @@ namespace UAssetAPI
                 writer.Write((int)ObjectVersion);
             }
 
-            if (LegacyFileVersion <= -8)
+            if (LegacyFileVersion <= -8 && HasUE5VersionField)
             {
                 if (IsUnversioned)
                 {
@@ -2499,7 +2531,7 @@ namespace UAssetAPI
 
             writer.Write(ThumbnailTableOffset);
 
-            if (ObjectVersionUE5 >= ObjectVersionUE5.IMPORT_TYPE_HIERARCHIES)
+            if (ObjectVersionUE5 >= ObjectVersionUE5.IMPORT_TYPE_HIERARCHIES || !HasUE5VersionField)
             {
                 writer.Write(ImportTypeHierarchiesCount);
                 writer.Write(ImportTypeHierarchiesOffset);
